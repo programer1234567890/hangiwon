@@ -1,0 +1,536 @@
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>네온 서킷: 레인 러너 모드</title>
+    <!-- Tailwind CSS CDN (스타일링용) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js CDN (3D 그래픽용) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Firebase CDN (데이터베이스 및 인증용) -->
+    <script type="module">
+        // Firebase 모듈 임포트
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firestore 로깅 활성화 (디버깅용)
+        setLogLevel('Debug');
+
+        // 전역 변수 설정 및 초기화
+        window.THREE = THREE; 
+        window.Game = {}; 
+
+        // 1. Firebase 설정 및 초기화
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            window.Game.app = initializeApp(firebaseConfig);
+            window.Game.db = getFirestore(window.Game.app);
+            window.Game.auth = getAuth(window.Game.app);
+        } else {
+            console.error("Firebase Configuration is missing.");
+            window.Game.db = null;
+        }
+
+        // 2. 인증 및 사용자 ID 설정
+        if (window.Game.db) {
+            const auth = window.Game.auth;
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    window.Game.userId = user.uid;
+                    document.getElementById('user-id-display').textContent = `사용자 ID: ${user.uid}`;
+                    console.log("Firebase Auth Ready. User ID:", window.Game.userId);
+                    // 인증 완료 후 최고 점수 로드
+                    if (window.Game.loadHighScore) {
+                        window.Game.loadHighScore(window.Game.db, appId, user.uid);
+                    }
+                } else {
+                    try {
+                        // 사용자 토큰이 있으면 로그인, 없으면 익명 로그인 시도
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken); 
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Firebase Authentication Error:", error);
+                    }
+                }
+            });
+
+            // 3. High Score 관리 함수 - 불러오기
+            window.Game.loadHighScore = async (db, appId, userId) => {
+                // 개인 데이터 경로: /artifacts/{appId}/users/{userId}/{collectionName}/{documentId}
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/gameData`, 'neonCircuit_highScore');
+                try {
+                    const docSnap = await getDoc(docRef);
+                    if (docSnap.exists()) {
+                        const savedScore = docSnap.data().score;
+                        window.Game.highScore = savedScore;
+                        document.getElementById('high-score').textContent = savedScore.toFixed(0);
+                    } else {
+                        window.Game.highScore = 0;
+                    }
+                } catch (e) {
+                    console.error("Error loading document: ", e);
+                    window.Game.highScore = 0;
+                }
+            };
+
+            // 4. High Score 관리 함수 - 저장하기
+            window.Game.saveHighScore = async (db, appId, userId, newScore) => {
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/gameData`, 'neonCircuit_highScore');
+                // 기존 점수와 새 점수 중 더 높은 점수를 저장
+                const scoreToSave = Math.max(window.Game.highScore, newScore); 
+                try {
+                    await setDoc(docRef, { score: scoreToSave, lastUpdated: new Date() });
+                    window.Game.highScore = scoreToSave;
+                    document.getElementById('high-score').textContent = scoreToSave.toFixed(0);
+                } catch (e) {
+                    console.error("Error saving document: ", e);
+                }
+            };
+        } else {
+            // Firebase가 초기화되지 않은 경우 더미 함수 설정
+            window.Game.loadHighScore = () => { window.Game.highScore = 0; document.getElementById('high-score').textContent = 'N/A (No DB)'; };
+            window.Game.saveHighScore = () => { console.warn("Cannot save score: DB not initialized."); };
+            window.Game.highScore = 0;
+        }
+
+    </script>
+    <style>
+        /* 커스텀 스타일 및 네온 효과 */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #000;
+            color: #fff;
+            overflow: hidden; /* 스크롤 방지 */
+        }
+        #game-container {
+            width: 100%;
+            height: 100vh;
+        }
+        canvas {
+            display: block;
+            border-radius: 0.75rem; 
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.5), 0 0 20px rgba(0, 255, 255, 0.25);
+        }
+        .neon-button {
+            padding: 1rem 2rem;
+            font-size: 1.25rem;
+            font-weight: bold;
+            color: #0ff; 
+            background: #000;
+            border: 2px solid #0ff;
+            border-radius: 9999px; 
+            box-shadow: 0 0 10px #0ff, inset 0 0 5px #0ff;
+            transition: all 0.3s ease-in-out;
+        }
+        .neon-button:hover {
+            color: #000;
+            background: #0ff;
+            box-shadow: 0 0 20px #0ff, inset 0 0 10px #0ff;
+            transform: scale(1.05);
+        }
+        .neon-text {
+            text-shadow: 0 0 5px #f0f, 0 0 10px #f0f, 0 0 20px #0ff, 0 0 40px #0ff;
+            color: #fff;
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            border: 3px solid #f0f;
+            border-radius: 1rem;
+            padding: 2rem;
+            box-shadow: 0 0 20px #f0f, 0 0 40px rgba(255, 0, 255, 0.5);
+            text-align: center;
+            z-index: 1000;
+            max-width: 90%;
+            width: 400px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Tailwind를 사용하여 전체 화면 컨테이너 및 중앙 정렬 적용 -->
+<div id="game-container" class="relative w-full h-screen flex flex-col items-center justify-center bg-black">
+    <canvas id="neon-circuit-canvas"></canvas>
+
+    <!-- UI Overlay (Tailwind로 간격 및 스타일 개선) -->
+    <div class="absolute top-0 left-0 w-full p-4 flex justify-between text-xl font-mono">
+        <div class="p-2 bg-black/70 rounded-lg neon-text shadow-lg">
+            점수: <span id="current-score">0</span>
+        </div>
+        <div class="p-2 bg-black/70 rounded-lg neon-text text-yellow-300 shadow-lg">
+            최고 점수: <span id="high-score">0</span>
+        </div>
+    </div>
+
+    <!-- Message/Start Screen -->
+    <div id="game-message" class="message-box">
+        <h1 class="text-3xl font-bold mb-4 neon-text text-green-500">🎮 네온 서킷: 레인 러너 🚀</h1>
+        <p class="mb-8 font-bold text-yellow-300">조작법: A/D 또는 ◀/▶ 키로 좌우 이동하여 벽을 피하세요.</p>
+        <p class="mb-8 font-bold text-red-400">속도가 계속 빨라지니 주의!</p>
+        <button id="start-button" class="neon-button">게임 시작</button>
+    </div>
+
+    <!-- Footer for User ID -->
+    <div id="user-id-display" class="absolute bottom-0 right-0 p-2 text-xs text-gray-500 bg-black/50 rounded-tl-lg">
+        사용자 ID: (로딩 중...)
+    </div>
+</div>
+
+<script type="module">
+    // Firebase 전역 객체가 로드될 때까지 대기
+    if (typeof window.THREE === 'undefined') {
+        console.error("Three.js is not loaded.");
+    }
+
+    const { THREE, Game } = window;
+    const canvas = document.getElementById('neon-circuit-canvas');
+    const messageBox = document.getElementById('game-message');
+    const startButton = document.getElementById('start-button');
+    const scoreDisplay = document.getElementById('current-score');
+    const highScoreDisplay = document.getElementById('high-score');
+    const gameContainer = document.getElementById('game-container'); 
+
+    let scene, camera, renderer;
+    let player, playerSpeed = 1.0; 
+    let gameState = 'start'; 
+    let score = 0;
+    let highscore = Game.highScore || 0;
+    let keys = {};
+    let obstacleGenerationTimer = 0;
+    let obstacles = [];
+    let animationId = null; 
+
+    // 상수: 플레이어 높이 및 충돌 박스
+    const PLAYER_HEIGHT = 1.5; // 시점 높이와 충돌 박스 중심 높이 (바닥에 고정)
+    const COLLISION_HEIGHT = 1.8; // 충돌 박스 높이 (충돌을 감지하기 위한 높이)
+    
+    // 게임 설정
+    const config = {
+        baseForwardSpeed: 0.20, 
+        forwardSpeed: 0.20,    
+        accelerationRate: 0.0012, // 속도 증가율
+        sideSpeed: 0.12,       
+        laneWidth: 6.7,       // 터널 폭
+        trackHeight: 10,      
+        numLanes: 3,           
+        // 변경된 부분: 장애물 간격 8로 고정
+        obstacleZSpacing: 8,   
+        maxObstacles: 50,  
+        worldLength: 5000,
+        cameraFOV: 65          
+    };
+
+    // 1. 초기화 함수 (Initialization Function)
+    function init() {
+        // Scene 
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000); 
+
+        // Camera (First-person view, Y-position is fixed on the ground)
+        camera = new THREE.PerspectiveCamera(config.cameraFOV, window.innerWidth / window.innerHeight, 0.1, 1000); 
+        camera.position.set(0, PLAYER_HEIGHT, 0); // 플레이어 높이 고정
+        player = camera; 
+        player.rotation.z = 0; // 회전 제거
+
+        // Renderer
+        renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+
+        // Floor (Circuit Track)
+        const floorGeometry = new THREE.PlaneGeometry(config.laneWidth * 2, config.worldLength * 2); 
+        const floorMaterial = new THREE.MeshBasicMaterial({
+            color: 0x00ffff, 
+            side: THREE.DoubleSide,
+            wireframe: true, 
+            transparent: true,
+            opacity: 0.1 
+        });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = Math.PI / 2; 
+        floor.position.z = -config.worldLength; 
+        scene.add(floor);
+        window.Game.floor = floor;
+
+        // Ceiling (Track Boundary - visibility reduced as it's just boundary)
+        const ceiling = floor.clone();
+        ceiling.position.y = config.trackHeight; 
+        ceiling.rotation.x = -Math.PI / 2; 
+        ceiling.material = new THREE.MeshBasicMaterial({ 
+            color: 0x00ffff, 
+            side: THREE.DoubleSide,
+            wireframe: true, 
+            transparent: true,
+            opacity: 0.05 
+        }); 
+        scene.add(ceiling);
+        window.Game.ceiling = ceiling;
+
+        // Event Listeners
+        window.addEventListener('resize', onWindowResize, false);
+        window.addEventListener('keydown', onKeyDown, false);
+        window.addEventListener('keyup', onKeyUp, false);
+        startButton.addEventListener('click', startGame);
+
+        // 초기 최고 점수 로드 및 표시
+        highScoreDisplay.textContent = highscore.toFixed(0);
+    }
+
+    // 키 다운 이벤트 핸들러
+    function onKeyDown(event) {
+        // 좌우 이동 (A, D, ArrowLeft, ArrowRight)만 처리
+        const key = event.key.toLowerCase();
+        if (key === 'a' || key === 'd' || key === 'arrowleft' || key === 'arrowright') {
+            keys[key] = true;
+        }
+        if (event.key === 'ArrowLeft') keys['a'] = true;
+        if (event.key === 'ArrowRight') keys['d'] = true;
+    }
+
+    function onKeyUp(event) {
+        // 좌우 이동 키 해제만 처리
+        const key = event.key.toLowerCase();
+        if (key === 'a' || key === 'd' || key === 'arrowleft' || key === 'arrowright') {
+            keys[key] = false;
+        }
+        if (event.key === 'ArrowLeft') keys['a'] = false;
+        if (event.key === 'ArrowRight') keys['d'] = false;
+    }
+
+    // 게임 시작
+    function startGame() {
+        if (gameState === 'playing') return;
+
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        }
+
+        resetGame();
+        messageBox.style.display = 'none';
+        gameState = 'playing';
+        animate(); 
+    }
+
+    // 게임 초기화
+    function resetGame() {
+        score = 0;
+        playerSpeed = 1.0; 
+        
+        player.position.set(0, PLAYER_HEIGHT, 0); // Y 위치 고정
+
+        // 장애물 제거
+        obstacles.forEach(obj => scene.remove(obj));
+        obstacles = [];
+        obstacleGenerationTimer = 0;
+        scoreDisplay.textContent = '0';
+        highScoreDisplay.textContent = Game.highScore ? Game.highScore.toFixed(0) : '0';
+    }
+
+    // 2. 게임 루프 (Animation)
+    function animate() {
+        animationId = requestAnimationFrame(animate);
+
+        if (gameState === 'playing') {
+            updateGame();
+            checkCollision();
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // 3. 게임 업데이트 로직
+    function updateGame() {
+        // A. 플레이어 좌우 이동 (Side to side)
+        let sideMovement = 0;
+
+        if (keys['a']) sideMovement -= config.sideSpeed;
+        if (keys['d']) sideMovement += config.sideSpeed;
+        
+        // X축 이동 제한
+        player.position.x += sideMovement * playerSpeed;
+        player.position.x = Math.max(-config.laneWidth / 2, Math.min(config.laneWidth / 2, player.position.x));
+
+        // B. 수직 이동 및 회전 제거 (점프, 웅크리기, 중력 반전 제거)
+        player.position.y = PLAYER_HEIGHT; 
+        player.rotation.z = 0; 
+
+        // C. 속도 증가 및 점수 업데이트
+        config.forwardSpeed = config.baseForwardSpeed * playerSpeed + (Math.random() - 0.5) * 0.01;
+        player.position.z -= config.forwardSpeed;
+
+        playerSpeed += config.accelerationRate; 
+        score = -player.position.z; 
+        scoreDisplay.textContent = score.toFixed(0);
+
+        // D. 장애물 생성
+        obstacleGenerationTimer += config.forwardSpeed;
+        // 장애물 간격이 config.obstacleZSpacing(8)로 고정됨
+        if (obstacleGenerationTimer >= config.obstacleZSpacing) {
+            generateObstacle();
+            obstacleGenerationTimer = 0;
+            // 이전의 동적 간격 설정 코드 제거됨
+        }
+
+        // E. 장애물 이동 및 제거
+        const playerZ = player.position.z;
+        for (let i = 0; i < obstacles.length; i++) {
+            const obstacle = obstacles[i];
+            if (obstacle.position.z > playerZ + 5) {
+                scene.remove(obstacle);
+                obstacles.splice(i, 1);
+                i--;
+            }
+        }
+    }
+
+
+    // 4. 장애물 생성 함수 (Lane Blocker만 생성)
+    function generateObstacle() {
+        // 장애물 타입: Lane Blocker (수평 이동만 가능하므로, 수직 요소는 제거)
+        const spawnZ = player.position.z - 50;
+        const lanePositions = [-config.laneWidth/3, 0, config.laneWidth/3]; 
+        const numLanes = config.numLanes;
+
+        // 벽 높이는 플레이어 충돌 높이보다 훨씬 높게 설정 (피할 수 없게)
+        const sizeX = 2; 
+        const sizeY = config.trackHeight * 0.5; // 터널 높이의 절반
+        const sizeZ = 0.5;
+
+        // 장애물 중심 Y 위치 (바닥 기준: sizeY / 2)
+        const wallCenterY = sizeY / 2; 
+
+        // 1개 또는 2개의 레인을 막음
+        const numBlocks = Math.random() < 0.6 ? 2 : 1; 
+        
+        let blockedLanes = new Set();
+        // 1. 막히지 않을 레인(통로) 선택
+        let openLane = Math.floor(Math.random() * numLanes); 
+
+        // 2. 나머지 레인을 막음
+        for (let i = 0; i < numLanes; i++) {
+            if (i !== openLane) {
+                // 남은 레인들 중 랜덤하게 1개(numBlocks=2일 경우) 또는 2개(numBlocks=1일 경우)를 막음
+                if (numBlocks === 1 && Math.random() < 0.5 && blockedLanes.size === 1) {
+                    continue; // 1개만 막아야 할 경우 50% 확률로 건너뜀
+                }
+
+                const geometry = new THREE.BoxGeometry(sizeX, sizeY, sizeZ);
+                const material = new THREE.MeshBasicMaterial({
+                    color: 0xff00ff, 
+                    emissive: 0xff00ff,
+                    emissiveIntensity: 1.5,
+                    wireframe: false
+                });
+                const obstacle = new THREE.Mesh(geometry, material);
+
+                obstacle.position.set(lanePositions[i], wallCenterY, spawnZ); 
+                obstacle.userData.collisionBox = new THREE.Box3().setFromObject(obstacle);
+                obstacle.userData.type = 'HAZARD';
+
+                scene.add(obstacle);
+                obstacles.push(obstacle);
+                blockedLanes.add(i);
+
+                if (blockedLanes.size >= numBlocks) break;
+            }
+        }
+    }
+
+    // 5. 충돌 감지 로직 (Collision Detection Logic - Simplified)
+    function checkCollision() {
+        const playerBoundingBox = new THREE.Box3();
+        
+        // 고정된 플레이어 충돌 박스
+        playerBoundingBox.setFromCenterAndSize(
+            new THREE.Vector3(player.position.x, player.position.y, player.position.z),
+            new THREE.Vector3(0.5, COLLISION_HEIGHT, 0.5) // X, Z 너비는 고정, Y 높이 고정
+        );
+
+        for (let i = 0; i < obstacles.length; i++) {
+            const obstacle = obstacles[i];
+            const obstacleBox = obstacle.userData.collisionBox.clone();
+            
+            if (playerBoundingBox.intersectsBox(obstacleBox)) {
+                // 일반 장애물에 닿으면 게임 오버
+                gameOver();
+                return;
+            }
+        }
+    }
+
+    // 6. 게임 오버
+    function gameOver() {
+        gameState = 'gameover';
+        console.log("Game Over! Score:", score.toFixed(0));
+
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        }
+
+        // 최고 점수 업데이트 및 저장
+        if (score > highscore) {
+            highscore = score;
+            highScoreDisplay.textContent = highscore.toFixed(0);
+            if (Game.db && Game.userId) {
+                Game.saveHighScore(Game.db, Game.appId, Game.userId, highscore);
+            }
+            messageBox.innerHTML = `
+                <h1 class="text-3xl font-bold mb-4 neon-text text-yellow-300">최고 점수 갱신!</h1>
+                <p class="text-2xl mb-6">최종 점수: ${score.toFixed(0)}</p>
+                <button id="restart-button" class="neon-button">다시 시작</button>
+            `;
+        } else {
+            messageBox.innerHTML = `
+                <h1 class="text-3xl font-bold mb-4 neon-text text-red-500">게임 오버</h1>
+                <p class="text-2xl mb-6">최종 점수: ${score.toFixed(0)}</p>
+                <p class="mb-4">최고 점수: ${highscore.toFixed(0)}</p>
+                <button id="restart-button" class="neon-button">다시 시작</button>
+            `;
+        }
+
+        document.getElementById('restart-button').addEventListener('click', startGame);
+        messageBox.style.display = 'block';
+    }
+
+    // 창 크기 조정 핸들러 (Window Resize Handler)
+    function onWindowResize() {
+        // 컨테이너 크기 기준으로 캔버스 크기 계산
+        const containerWidth = gameContainer.clientWidth;
+        const containerHeight = gameContainer.clientHeight;
+        
+        // 캔버스 크기를 컨테이너의 95%(너비)와 75%(높이)로 설정
+        const width = containerWidth * 0.95; 
+        const height = containerHeight * 0.75;
+
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(width, height);
+    }
+
+
+    // 창 로드 시 초기화 및 크기 조정
+    window.onload = function() {
+        init();
+        onWindowResize();
+
+        if (Game.highScore !== undefined) {
+            highScoreDisplay.textContent = Game.highScore.toFixed(0);
+        }
+    };
+</script>
+
+</body>
+</html>
